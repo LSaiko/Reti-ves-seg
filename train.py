@@ -28,8 +28,9 @@ from models import ARCHS, build_model
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train a vessel-segmentation model on DRIVE")
     p.add_argument("--drive-root", default="DRIVE")
-    p.add_argument("--arch", default="smp_resnet34", choices=ARCHS,
-                   help="Model: smp_resnet34 (pretrained) or unet (from scratch).")
+    p.add_argument("--arch", default="unet", choices=ARCHS,
+                   help="Model: unet (from scratch, default/best) or "
+                        "smp_resnet34 (pretrained encoder).")
     p.add_argument("--epochs", type=int, default=150)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)

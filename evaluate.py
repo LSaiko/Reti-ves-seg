@@ -62,7 +62,7 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
 
     ckpt = torch.load(args.checkpoint, map_location=device)
-    model = build_model(ckpt.get("arch", "smp_resnet34")).to(device)
+    model = build_model(ckpt.get("arch", "unet")).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 

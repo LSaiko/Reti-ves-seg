@@ -38,7 +38,7 @@ def get_model() -> torch.nn.Module:
     """Lazily load and cache the trained model (architecture from checkpoint)."""
     global _model
     if _model is None:
-        arch = "smp_resnet34"
+        arch = "unet"
         state = None
         if os.path.exists(CHECKPOINT):
             ckpt = torch.load(CHECKPOINT, map_location=DEVICE)

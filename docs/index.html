@@ -77,9 +77,9 @@
 <div class="wrap">
 
   <h2 id="results">Results <span class="pipe">— inside field-of-view</span></h2>
-  <p style="color:var(--muted)">Best of two interchangeable models (smp ResNet34
-     and a from-scratch U-Net); the scratch U-Net edged ahead on this small
-     split. Both clear the &gt; 0.81 DRIVE benchmark.</p>
+  <p style="color:var(--muted)">From-scratch U-Net (default) on the 2-channel
+     CLAHE+Frangi input; it beat the pretrained smp ResNet34 alternative at every
+     patch size tried. Both clear the &gt; 0.81 DRIVE benchmark.</p>
   <div class="metrics">
     <div class="metric"><div class="v">0.834</div><div class="l">F1 (Dice) · target &gt; 0.81</div></div>
     <div class="metric"><div class="v">0.845</div><div class="l">Sensitivity</div></div>

@@ -15,17 +15,18 @@ label-free "goodness" score.
 Evaluated on a held-out validation split, **strictly inside the field-of-view
 (FOV) mask** (the way published DRIVE results are reported):
 
-| Metric | smp + ResNet34 + Frangi *(default)* | Scratch U-Net *(`--arch unet`)* |
+| Metric | Scratch U-Net *(default)* | smp + ResNet34 *(`--arch smp_resnet34`)* |
 |--------|:--:|:--:|
-| **F1 (Dice)** | **0.821** ✅ | **0.834** ✅ |
-| Sensitivity | 0.809 | 0.845 |
-| Specificity | 0.975 | 0.972 |
-| AUC | 0.976 | 0.980 |
+| **F1 (Dice)** | **0.833** ✅ | 0.821 ✅ |
+| Sensitivity | 0.821 | 0.809 |
+| Specificity | 0.977 | 0.975 |
+| AUC | 0.980 | 0.976 |
 
-Both clear the commonly cited **> 0.81** DRIVE benchmark. Interestingly, on this
-small 16-image split the from-scratch U-Net edges out the heavier pretrained
-model — see [Notes & findings](#notes--findings). Pick the architecture with
-`--arch {smp_resnet34,unet}`.
+Both use the same 2-channel CLAHE+Frangi input and both clear the commonly cited
+**> 0.81** DRIVE benchmark. On this small 16-image split the from-scratch U-Net
+beat the heavier pretrained model **across every patch size tried** (64/128px)
+and trained more stably — so it's the default. Pick the architecture with
+`--arch {unet,smp_resnet34}`. See [Notes & findings](#notes--findings).
 
 ---
 
@@ -65,11 +66,11 @@ RGB fundus image
   peaks by ~epoch 15–20); the scratch model uses lr 1e-3 over 150 epochs.
 
 ```bash
-# default: pretrained ResNet34 encoder
-python train.py --arch smp_resnet34 --epochs 50 --lr 1e-4 \
+# default: from-scratch U-Net (best & most stable here)
+python train.py --arch unet --epochs 120 --lr 1e-3 \
                 --patch-size 64 --patches-per-epoch 8000 --batch-size 16
-# from-scratch alternative (scored highest here)
-python train.py --arch unet --epochs 150 --lr 1e-3 \
+# pretrained ResNet34 encoder alternative (gentler recipe)
+python train.py --arch smp_resnet34 --epochs 50 --lr 1e-4 \
                 --patch-size 64 --patches-per-epoch 8000 --batch-size 16
 python evaluate.py --checkpoint checkpoints/model_drive.pth
 ```
@@ -183,12 +184,12 @@ paths.
 ## Notes & findings
 
 - **Pretrained ≠ automatically better.** On this 16-image split the heavier
-  smp + ResNet34 + Frangi model peaked at F1 ≈ 0.82 and then *overfit* (val F1
-  collapsing after ~epoch 15–20), while the from-scratch U-Net reached 0.834 and
-  stayed stable. Likely causes: ResNet34's 32× downsampling leaves only a 2×2
-  bottleneck on 64px patches, and a big pretrained net overfits 16 images fast.
-  Larger patches (96–128px) would suit the deep encoder better — see
-  [`IMPROVEMENTS.md`](IMPROVEMENTS.md).
+  smp + ResNet34 model underperformed the from-scratch U-Net (0.833) at **every
+  patch size tried**: 64px → 0.821 (then overfit-collapses), 128px → 0.817
+  (stable but lower). Larger patches gave the deep encoder a bigger bottleneck
+  and fixed the instability, but didn't close the accuracy gap. The simpler
+  model wins here — pretrained ImageNet features and a deeper net don't help on
+  16 domain-specific images, and the bigger net overfits faster.
 - **Best-checkpoint saving matters:** because the pretrained model degrades after
   its peak, training always keeps the best-validation-F1 snapshot.
 - **Reproducibility caveat:** the val split is only 4 images, so expect ±a few

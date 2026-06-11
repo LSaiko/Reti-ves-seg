@@ -16,7 +16,7 @@ from unet import UNet
 ARCHS = ("unet", "smp_resnet34")
 
 
-def build_model(arch: str = "smp_resnet34", in_channels: int = IN_CHANNELS) -> nn.Module:
+def build_model(arch: str = "unet", in_channels: int = IN_CHANNELS) -> nn.Module:
     """Construct a segmentation model that returns logits.
 
     Args:

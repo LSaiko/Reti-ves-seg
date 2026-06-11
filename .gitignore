@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Model artifacts
+checkpoints/
+*.pth
+
+# Dataset — too large for git; download from Kaggle (see README)
+DRIVE/
+
+# Local outputs
+overlay.png
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

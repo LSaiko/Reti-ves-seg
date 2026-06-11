@@ -20,13 +20,13 @@ from torch.utils.data import DataLoader
 
 from dataset import DriveDataset, _pad_to, _read_image, build_splits, fov_paths_for
 from losses import segmentation_metrics
-from unet import UNet
+from models import build_model
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate U-Net on DRIVE")
+    p = argparse.ArgumentParser(description="Evaluate a vessel-segmentation model on DRIVE")
     p.add_argument("--drive-root", default="DRIVE")
-    p.add_argument("--checkpoint", default="checkpoints/unet_drive.pth")
+    p.add_argument("--checkpoint", default="checkpoints/model_drive.pth")
     p.add_argument("--clip-limit", type=float, default=2.0)
     p.add_argument("--threshold", type=float, default=0.5)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -61,8 +61,8 @@ def main() -> None:
     val_ds = DriveDataset(va_imgs, va_lbls, args.clip_limit)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
 
-    model = UNet(in_channels=1, base_channels=64).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device)
+    model = build_model(ckpt.get("arch", "smp_resnet34")).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
@@ -72,7 +72,7 @@ def main() -> None:
 
     for (images, masks), fov_path in zip(val_loader, va_fovs):
         images = images.to(device)
-        probs = model(images).cpu()
+        probs = torch.sigmoid(model(images)).cpu()
         fov = torch.from_numpy(_padded_fov(fov_path)).unsqueeze(0).unsqueeze(0)
 
         m = segmentation_metrics(probs, masks, fov_mask=fov, threshold=args.threshold)

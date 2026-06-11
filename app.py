@@ -23,29 +23,34 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from PIL import Image
 
-from dataset import _pad_to, apply_clahe
-from unet import UNet
+from dataset import _pad_to, make_input
+from models import build_model
 
-CHECKPOINT = os.environ.get("UNET_CHECKPOINT", "checkpoints/unet_drive.pth")
+CHECKPOINT = os.environ.get("MODEL_CHECKPOINT", "checkpoints/model_drive.pth")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 THRESHOLD = float(os.environ.get("VESSEL_THRESHOLD", "0.5"))
 
-app = FastAPI(title="Retinal Vessel Segmentation", version="1.0.0")
-_model: UNet | None = None
+app = FastAPI(title="Retinal Vessel Segmentation", version="2.0.0")
+_model: torch.nn.Module | None = None
 
 
-def get_model() -> UNet:
-    """Lazily load and cache the trained U-Net."""
+def get_model() -> torch.nn.Module:
+    """Lazily load and cache the trained model (architecture from checkpoint)."""
     global _model
     if _model is None:
-        model = UNet(in_channels=1, base_channels=64).to(DEVICE)
+        arch = "smp_resnet34"
+        state = None
         if os.path.exists(CHECKPOINT):
             ckpt = torch.load(CHECKPOINT, map_location=DEVICE)
-            model.load_state_dict(ckpt["model_state"])
+            arch = ckpt.get("arch", arch)
+            state = ckpt["model_state"]
         else:
             # Allow the service to start without weights (returns noise);
             # useful for wiring/smoke tests before training completes.
             print(f"WARNING: checkpoint '{CHECKPOINT}' not found — using random weights.")
+        model = build_model(arch).to(DEVICE)
+        if state is not None:
+            model.load_state_dict(state)
         model.eval()
         _model = model
     return _model
@@ -68,43 +73,52 @@ def estimate_fov(rgb: np.ndarray) -> np.ndarray:
 
 
 @torch.no_grad()
-def predict(rgb: np.ndarray, clip_limit: float = 2.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def predict(
+    rgb: np.ndarray, clip_limit: float = 2.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Predict vessel probabilities and a binary mask for an RGB fundus image.
+
+    Uses the same 2-channel input as training ([CLAHE green, Frangi]) and applies
+    a sigmoid to the model's logits.
 
     Args:
         rgb: RGB image of shape ``(H, W, 3)``, ``uint8``.
         clip_limit: CLAHE clip limit (must match training).
 
     Returns:
-        Tuple ``(mask, probs, fov)`` where ``mask`` is a ``uint8`` ``{0, 1}``
-        array, ``probs`` is the float probability map in ``[0, 1]``, and ``fov``
-        is the boolean field-of-view mask — all of shape ``(H, W)``.
+        Tuple ``(mask, probs, fov, frangi)`` — the binary mask (``uint8``
+        ``{0, 1}``), the probability map (``[0, 1]``), the boolean FOV mask, and
+        the Frangi vesselness map (``[0, 1]``) — all of shape ``(H, W)``.
     """
     h, w = rgb.shape[:2]
-    enhanced = apply_clahe(rgb, clip_limit).astype(np.float32) / 255.0
-    padded, (top, left) = _pad_to(enhanced)
+    inp = make_input(rgb, clip_limit)             # (H, W, 2)
+    padded, (top, left) = _pad_to(inp)            # (608, 608, 2)
 
-    tensor = torch.from_numpy(padded).unsqueeze(0).unsqueeze(0).to(DEVICE)
-    probs = get_model()(tensor).squeeze().cpu().numpy()
+    tensor = torch.from_numpy(padded).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
+    logits = get_model()(tensor)
+    probs = torch.sigmoid(logits).squeeze().cpu().numpy()
 
     # Crop back to the original frame.
     probs = probs[top : top + h, left : left + w]
     fov = estimate_fov(rgb)
+    frangi = inp[:, :, 1]                          # second input channel
     mask = ((probs >= THRESHOLD) & fov).astype(np.uint8)
-    return mask, probs, fov
+    return mask, probs, fov, frangi
 
 
-def quality_scores(mask: np.ndarray, probs: np.ndarray, fov: np.ndarray) -> dict[str, float]:
+def quality_scores(
+    mask: np.ndarray, probs: np.ndarray, fov: np.ndarray
+) -> dict[str, float]:
     """Compute label-free "goodness" scores for a segmentation.
 
-    Without ground truth we report two intuitive proxies, both as percentages:
+    Without ground truth we report two intuitive percentages:
 
     * ``coverage_pct`` — share of the retina (FOV) marked as vessel. Healthy
       fundus images sit around 8-13%; values far outside hint at over/under
       segmentation.
-    * ``confidence_pct`` — mean decisiveness ``max(p, 1-p)`` of the model inside
-      the FOV, rescaled so 0.5 (pure uncertainty) maps to 0% and 1.0 (fully
-      committed) maps to 100%. Higher means the model is rarely "on the fence".
+    * ``confidence_pct`` — mean *decisiveness* ``max(p, 1-p)`` of the model
+      inside the FOV, rescaled so 0.5 (pure uncertainty) -> 0% and 1.0 (fully
+      committed) -> 100%. High means the model rarely sits on the fence.
 
     Args:
         mask: Binary vessel mask, ``{0, 1}``.
@@ -118,8 +132,9 @@ def quality_scores(mask: np.ndarray, probs: np.ndarray, fov: np.ndarray) -> dict
     coverage_pct = 100.0 * float(mask.sum()) / fov_px
 
     p = probs[fov]
-    decisiveness = np.maximum(p, 1.0 - p)           # in [0.5, 1.0]
-    confidence_pct = 100.0 * float((decisiveness.mean() - 0.5) / 0.5)
+    decisiveness = float(np.maximum(p, 1.0 - p).mean())          # [0.5, 1.0]
+    confidence_pct = 100.0 * (decisiveness - 0.5) / 0.5          # [0, 100]
+
     return {"coverage_pct": coverage_pct, "confidence_pct": confidence_pct}
 
 
@@ -186,7 +201,7 @@ async def segment(file: UploadFile = File(...)) -> StreamingResponse:
     ``X-Vessel-Coverage-Pct`` and ``X-Confidence-Pct`` response headers.
     """
     rgb = await _read_rgb(file)
-    mask, probs, fov = predict(rgb)
+    mask, probs, fov, _ = predict(rgb)
     scores = quality_scores(mask, probs, fov)
     blended = overlay_mask(rgb, mask, scores)
 
@@ -207,5 +222,5 @@ async def segment(file: UploadFile = File(...)) -> StreamingResponse:
 async def segment_json(file: UploadFile = File(...)) -> dict[str, float]:
     """Segment vessels and return only the numeric quality scores as JSON."""
     rgb = await _read_rgb(file)
-    mask, probs, fov = predict(rgb)
+    mask, probs, fov, _ = predict(rgb)
     return quality_scores(mask, probs, fov)

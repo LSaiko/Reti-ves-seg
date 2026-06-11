@@ -62,11 +62,11 @@
      images, trained on the DRIVE dataset and served through a FastAPI overlay
      endpoint.</p>
   <div class="badges">
-    <span class="badge">F1 <b>0.834</b></span>
-    <span class="badge">AUC <b>0.980</b></span>
-    <span class="badge">PyTorch · U-Net</span>
-    <span class="badge">FastAPI</span>
-    <span class="badge">DRIVE</span>
+    <span class="badge">F1 <b>0.83</b></span>
+    <span class="badge">AUC <b>0.98</b></span>
+    <span class="badge">U-Net · ResNet34</span>
+    <span class="badge">CLAHE + Frangi</span>
+    <span class="badge">FastAPI · DRIVE</span>
   </div>
   <div>
     <a class="btn" href="https://github.com/LSaiko/Reti-ves-seg">View on GitHub</a>
@@ -77,6 +77,9 @@
 <div class="wrap">
 
   <h2 id="results">Results <span class="pipe">— inside field-of-view</span></h2>
+  <p style="color:var(--muted)">Best of two interchangeable models (smp ResNet34
+     and a from-scratch U-Net); the scratch U-Net edged ahead on this small
+     split. Both clear the &gt; 0.81 DRIVE benchmark.</p>
   <div class="metrics">
     <div class="metric"><div class="v">0.834</div><div class="l">F1 (Dice) · target &gt; 0.81</div></div>
     <div class="metric"><div class="v">0.845</div><div class="l">Sensitivity</div></div>
@@ -98,15 +101,17 @@
 
   <h2 id="method">Method</h2>
   <pre>RGB fundus image
-  <span class="pipe">└─</span> green channel        <span class="pipe"># vessels have highest contrast here</span>
-       <span class="pipe">└─</span> CLAHE (clipLimit=2.0) <span class="pipe"># local contrast enhancement</span>
-            <span class="pipe">└─</span> U-Net (4 enc + 4 dec, skip connections)
-                 <span class="pipe">└─</span> 1×1 conv → sigmoid → vessel probability map</pre>
+  <span class="pipe">└─</span> CLAHE green channel    <span class="pipe"># channel 0 — contrast enhancement</span>
+  <span class="pipe">└─</span> Frangi vesselness      <span class="pipe"># channel 1 — Hessian tubularity prior</span>
+       <span class="pipe">└─</span> U-Net (pretrained ResNet34 encoder, or from-scratch)
+            <span class="pipe">└─</span> 1×1 conv → sigmoid → vessel probability map</pre>
   <ul>
+    <li><b>Input:</b> 2-channel <code>[CLAHE green, Frangi]</code> stack, padded
+        to 608×608.</li>
     <li><b>Loss:</b> <code>0.5·BCE + 0.5·Dice</code> — the Dice term handles the
         ~10:1 background/vessel imbalance.</li>
-    <li><b>Training:</b> 48×48 random patches (8000/epoch), Adam + cosine schedule,
-        150 epochs (~40 min on an RTX 5060).</li>
+    <li><b>Training:</b> 64×64 random patches (8000/epoch), Adam + cosine schedule
+        on an RTX 5060; best-validation-F1 checkpoint saved.</li>
     <li><b>Evaluation:</b> F1 / sensitivity / specificity / AUC computed strictly
         inside the FOV mask, as in the DRIVE literature.</li>
   </ul>

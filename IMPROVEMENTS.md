@@ -1,7 +1,11 @@
-# Improvement Options (opt-in)
+# Improvement Options
 
-These are concrete, drop-in upgrade paths. None are enabled by default — pick
-what you want and tell me to integrate it. Each lists the expected payoff and
+> **Now integrated (default pipeline):** **A1 — Frangi vesselness channel** and
+> **B1 — smp U-Net + ResNet34**. The model consumes a 2-channel input
+> ([CLAHE green, Frangi]) and uses an ImageNet-pretrained ResNet34 encoder. The
+> remaining items below are still opt-in.
+
+These are concrete, drop-in upgrade paths. Each lists the expected payoff and
 the rough cost.
 
 ---

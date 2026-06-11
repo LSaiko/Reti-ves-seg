@@ -22,34 +22,38 @@ from dataset import (
     random_flip,
 )
 from losses import BCEDiceLoss, segmentation_metrics
-from unet import UNet
+from models import ARCHS, build_model
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train U-Net on DRIVE")
+    p = argparse.ArgumentParser(description="Train a vessel-segmentation model on DRIVE")
     p.add_argument("--drive-root", default="DRIVE")
+    p.add_argument("--arch", default="smp_resnet34", choices=ARCHS,
+                   help="Model: smp_resnet34 (pretrained) or unet (from scratch).")
     p.add_argument("--epochs", type=int, default=150)
-    p.add_argument("--batch-size", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--base-channels", type=int, default=64,
-                   help="Width of the first encoder block. Use 16-32 on CPU.")
-    p.add_argument("--patch-size", type=int, default=48,
-                   help="Patch side length for training. <=0 trains on full images.")
+    p.add_argument("--patch-size", type=int, default=64,
+                   help="Patch side length for training (multiple of 32). "
+                        "<=0 trains on full images.")
     p.add_argument("--patches-per-epoch", type=int, default=8000)
     p.add_argument("--clip-limit", type=float, default=2.0)
-    p.add_argument("--out", default="checkpoints/unet_drive.pth")
+    p.add_argument("--out", default="checkpoints/model_drive.pth")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
 
 @torch.no_grad()
-def evaluate(model: UNet, loader: DataLoader, device: str) -> dict[str, float]:
-    """Run validation and aggregate metrics over the full split."""
+def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> dict[str, float]:
+    """Run validation and aggregate metrics over the full split.
+
+    Models emit logits, so a sigmoid is applied before thresholding.
+    """
     model.eval()
     agg = {"tp": 0.0, "fp": 0.0, "tn": 0.0, "fn": 0.0}
     for images, masks in loader:
         images, masks = images.to(device), masks.to(device)
-        probs = model(images)
+        probs = torch.sigmoid(model(images))
         m = segmentation_metrics(probs, masks)
         for k in agg:
             agg[k] += m[k]
@@ -88,7 +92,8 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
     print(f"Train items: {len(train_ds)}  Val images: {len(val_ds)}")
 
-    model = UNet(in_channels=1, base_channels=args.base_channels, return_logits=True).to(device)
+    model = build_model(args.arch).to(device)
+    print(f"Model: {args.arch}  (2-channel input: CLAHE green + Frangi)")
     criterion = BCEDiceLoss(bce_weight=0.5, dice_weight=0.5, from_logits=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -115,9 +120,7 @@ def main() -> None:
         scheduler.step()
 
         # Validate every epoch so progress is always visible.
-        model.return_logits = False
         metrics = evaluate(model, val_loader, device)
-        model.return_logits = True
         print(
             f"\rEpoch {epoch:3d} | loss {running/len(train_loader):.4f} "
             f"| F1 {metrics['f1']:.4f} | Se {metrics['sensitivity']:.4f} "
@@ -126,7 +129,10 @@ def main() -> None:
         )
         if metrics["f1"] > best_f1:
             best_f1 = metrics["f1"]
-            torch.save({"model_state": model.state_dict(), "f1": best_f1}, args.out)
+            torch.save(
+                {"model_state": model.state_dict(), "f1": best_f1, "arch": args.arch},
+                args.out,
+            )
             print(f"  saved checkpoint (F1={best_f1:.4f}) -> {args.out}", flush=True)
 
     print(f"Best validation F1: {best_f1:.4f}")

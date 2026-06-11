@@ -1,9 +1,11 @@
-"""DRIVE dataset loading and CLAHE preprocessing.
+"""DRIVE dataset loading and 2-channel preprocessing.
 
 DRIVE images are RGB fundus photographs. Retinal vessels exhibit the highest
-contrast in the green channel, so the pipeline extracts that channel and
-applies CLAHE (Contrast Limited Adaptive Histogram Equalization) to boost local
-vessel contrast before feeding a single-channel tensor to the network.
+contrast in the green channel, so the pipeline extracts that channel and applies
+CLAHE (Contrast Limited Adaptive Histogram Equalization). A second channel — a
+Frangi *vesselness* response, a Hessian-based filter tuned for tubular
+structures — is stacked on top, giving the network an explicit vessel prior.
+The model therefore consumes a **2-channel** input ``[CLAHE green, Frangi]``.
 
 The DRIVE training set provides 20 images with manual vessel annotations
 (``1st_manual``) and field-of-view (FOV) masks. The official ``test`` split
@@ -21,10 +23,15 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+from skimage.filters import frangi
 from torch.utils.data import Dataset
 
-# Pad target so spatial dims are divisible by 2**4 (four poolings).
-PAD_TO = 592
+# Pad target so spatial dims are divisible by 2**5 = 32 — required by the
+# ResNet encoder (5 downsamples) and also fine for the plain U-Net (needs 16).
+PAD_TO = 608
+
+# Number of input channels produced by make_input ([CLAHE green, Frangi]).
+IN_CHANNELS = 2
 
 
 def apply_clahe(image_rgb: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
@@ -41,6 +48,42 @@ def apply_clahe(image_rgb: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
     green = image_rgb[:, :, 1]
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
     return clahe.apply(green)
+
+
+def frangi_vesselness(clahe_green: np.ndarray) -> np.ndarray:
+    """Frangi vesselness response of a CLAHE green channel, normalised to [0, 1].
+
+    Args:
+        clahe_green: ``uint8`` CLAHE-enhanced green channel, shape ``(H, W)``.
+
+    Returns:
+        ``float32`` vesselness map in ``[0, 1]`` of shape ``(H, W)``; bright
+        ridges (vessels) score high.
+    """
+    v = frangi(clahe_green.astype(np.float32) / 255.0, sigmas=range(1, 5),
+               black_ridges=False)
+    v = np.nan_to_num(v, nan=0.0)
+    return (v / (v.max() + 1e-8)).astype(np.float32)
+
+
+def make_input(image_rgb: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
+    """Build the 2-channel network input from an RGB fundus image.
+
+    Channel 0 is the CLAHE-enhanced green channel in ``[0, 1]``; channel 1 is
+    the Frangi vesselness map in ``[0, 1]``.
+
+    Args:
+        image_rgb: RGB image, ``uint8``, shape ``(H, W, 3)``.
+        clip_limit: CLAHE clip limit.
+
+    Returns:
+        ``float32`` array of shape ``(H, W, 2)`` (HWC, ready for cropping /
+        augmentation; permute to CHW before passing to the model).
+    """
+    clahe = apply_clahe(image_rgb, clip_limit)
+    ch0 = clahe.astype(np.float32) / 255.0
+    ch1 = frangi_vesselness(clahe)
+    return np.stack([ch0, ch1], axis=-1)
 
 
 def _read_image(path: str) -> np.ndarray:
@@ -78,6 +121,10 @@ class DriveDataset(Dataset):
         clip_limit: CLAHE clip limit.
         augment: Optional callable applied to ``(image, mask)`` numpy arrays for
             data augmentation (training only).
+        cache: If ``True`` (default), the (expensive) 2-channel input —
+            including the Frangi filter — is computed once per image and reused.
+            This avoids recomputing Frangi every epoch, which otherwise leaks
+            host memory on RAM-constrained machines.
     """
 
     def __init__(
@@ -86,42 +133,54 @@ class DriveDataset(Dataset):
         label_paths: list[str],
         clip_limit: float = 2.0,
         augment: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
+        cache: bool = True,
     ) -> None:
         assert len(image_paths) == len(label_paths)
         self.image_paths = image_paths
         self.label_paths = label_paths
         self.clip_limit = clip_limit
         self.augment = augment
+        self.cache = cache
+        self._input_cache: dict[int, np.ndarray] = {}
 
     def __len__(self) -> int:
         return len(self.image_paths)
 
+    def _input_for(self, idx: int) -> np.ndarray:
+        """Return the 2-channel input for ``idx``, computing it at most once."""
+        if self.cache and idx in self._input_cache:
+            return self._input_cache[idx]
+        inp = make_input(_read_image(self.image_paths[idx]), self.clip_limit)
+        if self.cache:
+            self._input_cache[idx] = inp
+        return inp
+
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        rgb = _read_image(self.image_paths[idx])
-        enhanced = apply_clahe(rgb, self.clip_limit).astype(np.float32) / 255.0
+        inp = self._input_for(idx).copy()  # (H, W, 2); copy so augment is safe
 
         label = _read_image(self.label_paths[idx])
         label = (np.asarray(label) > 0).astype(np.float32)
 
         if self.augment is not None:
-            enhanced, label = self.augment(enhanced, label)
+            inp, label = self.augment(inp, label)
 
-        enhanced, _ = _pad_to(enhanced)
-        label, _ = _pad_to(label)
+        inp, _ = _pad_to(inp)        # (H, W, 2)
+        label, _ = _pad_to(label)    # (H, W)
 
-        image_t = torch.from_numpy(enhanced).unsqueeze(0)  # (1, H, W)
-        label_t = torch.from_numpy(label).unsqueeze(0)      # (1, H, W)
+        image_t = torch.from_numpy(inp).permute(2, 0, 1).contiguous()  # (2, H, W)
+        label_t = torch.from_numpy(label).unsqueeze(0)                  # (1, H, W)
         return image_t, label_t
 
 
 class DrivePatchDataset(Dataset):
     """Random-patch sampler for DRIVE — the configuration that reaches F1 > 0.81.
 
-    All images are CLAHE-enhanced and cached in host RAM once at construction
-    (16 small images, a few MB total). Each ``__getitem__`` returns a random
-    ``patch_size x patch_size`` crop whose centre lies inside the field of view,
-    so patches always contain retina. This keeps per-item tensors tiny, which
-    avoids the host-memory thrash of full-image training and trains far faster.
+    All 2-channel inputs ([CLAHE green, Frangi]) are computed and cached in host
+    RAM once at construction (16 small images, a few MB total). Each
+    ``__getitem__`` returns a random ``patch_size x patch_size`` crop whose
+    centre lies inside the field of view, so patches always contain retina. This
+    keeps per-item tensors tiny, which avoids the host-memory thrash of
+    full-image training and trains far faster.
 
     Args:
         image_paths: Fundus ``.tif`` image paths.
@@ -138,7 +197,7 @@ class DrivePatchDataset(Dataset):
         image_paths: list[str],
         label_paths: list[str],
         fov_paths: list[str],
-        patch_size: int = 48,
+        patch_size: int = 64,
         patches_per_epoch: int = 8000,
         clip_limit: float = 2.0,
         augment: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
@@ -148,12 +207,12 @@ class DrivePatchDataset(Dataset):
         self.patches_per_epoch = patches_per_epoch
         self.augment = augment
 
-        self.images: list[np.ndarray] = []
+        self.images: list[np.ndarray] = []   # each (H, W, 2)
         self.labels: list[np.ndarray] = []
         self.fovs: list[np.ndarray] = []
         for img_p, lbl_p, fov_p in zip(image_paths, label_paths, fov_paths):
             rgb = _read_image(img_p)
-            self.images.append(apply_clahe(rgb, clip_limit).astype(np.float32) / 255.0)
+            self.images.append(make_input(rgb, clip_limit))
             self.labels.append((np.asarray(_read_image(lbl_p)) > 0).astype(np.float32))
             self.fovs.append((np.asarray(_read_image(fov_p)) > 0).astype(np.uint8))
 
@@ -165,7 +224,7 @@ class DrivePatchDataset(Dataset):
         n = len(self.images)
         img_idx = np.random.randint(n)
         image, label, fov = self.images[img_idx], self.labels[img_idx], self.fovs[img_idx]
-        h, w = image.shape
+        h, w = image.shape[:2]
 
         # Reject-sample a patch whose centre is inside the FOV.
         for _ in range(20):
@@ -174,13 +233,13 @@ class DrivePatchDataset(Dataset):
             if fov[top + ps // 2, left + ps // 2]:
                 break
 
-        img_patch = image[top : top + ps, left : left + ps].copy()
+        img_patch = image[top : top + ps, left : left + ps, :].copy()  # (ps, ps, 2)
         lbl_patch = label[top : top + ps, left : left + ps].copy()
         if self.augment is not None:
             img_patch, lbl_patch = self.augment(img_patch, lbl_patch)
 
         return (
-            torch.from_numpy(img_patch).unsqueeze(0),
+            torch.from_numpy(img_patch).permute(2, 0, 1).contiguous(),  # (2, ps, ps)
             torch.from_numpy(lbl_patch).unsqueeze(0),
         )
 

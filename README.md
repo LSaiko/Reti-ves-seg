@@ -1,9 +1,10 @@
 # Retinal Vessel Segmentation (DRIVE) — U-Net + FastAPI
 
-Segment blood vessels in retinal fundus images with a from-scratch PyTorch
-U-Net, trained and evaluated on the **DRIVE** dataset, and served through a
-FastAPI endpoint that returns the predicted vessel mask overlaid on the original
-image — together with a label-free "goodness" score.
+Segment blood vessels in retinal fundus images with a PyTorch U-Net (pretrained
+ResNet34 encoder), a 2-channel CLAHE + Frangi input, trained and evaluated on
+the **DRIVE** dataset, and served through a FastAPI endpoint that returns the
+predicted vessel mask overlaid on the original image — together with a
+label-free "goodness" score.
 
 ![overlay example](docs/assets/01_overlay.png)
 
@@ -14,14 +15,17 @@ image — together with a label-free "goodness" score.
 Evaluated on a held-out validation split, **strictly inside the field-of-view
 (FOV) mask** (the way published DRIVE results are reported):
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **F1 (Dice)** | **0.834** | clinical benchmark target is > 0.81 ✅ |
-| Sensitivity | 0.845 | true-vessel recall |
-| Specificity | 0.972 | background correctness |
-| AUC | 0.980 | threshold-independent separability |
+| Metric | smp + ResNet34 + Frangi *(default)* | Scratch U-Net *(`--arch unet`)* |
+|--------|:--:|:--:|
+| **F1 (Dice)** | **0.821** ✅ | **0.834** ✅ |
+| Sensitivity | 0.809 | 0.845 |
+| Specificity | 0.975 | 0.972 |
+| AUC | 0.976 | 0.980 |
 
-The ~0.81 figure is the commonly cited DRIVE benchmark; this model clears it.
+Both clear the commonly cited **> 0.81** DRIVE benchmark. Interestingly, on this
+small 16-image split the from-scratch U-Net edges out the heavier pretrained
+model — see [Notes & findings](#notes--findings). Pick the architecture with
+`--arch {smp_resnet34,unet}`.
 
 ---
 
@@ -30,17 +34,20 @@ The ~0.81 figure is the commonly cited DRIVE benchmark; this model clears it.
 ```
 RGB fundus image
    └─ green channel (vessels have highest contrast here)
-        └─ CLAHE (cv2.createCLAHE, clipLimit=2.0)   ← contrast enhancement
-             └─ U-Net (4 encoder + 4 decoder blocks, skip connections)
+        └─ CLAHE (cv2.createCLAHE, clipLimit=2.0)        channel 0
+        └─ Frangi vesselness (Hessian tubularity filter) channel 1
+             └─ U-Net (smp ResNet34 encoder, or from-scratch 4+4 blocks)
                   └─ 1×1 conv → sigmoid → per-pixel vessel probability
 ```
 
-- **Preprocessing** ([`dataset.py`](dataset.py)): green-channel extraction +
-  CLAHE; images padded to 592×592 (divisible by 2⁴ for four poolings).
-- **Model** ([`unet.py`](unet.py)): standard U-Net. Each block is
-  `Conv → BatchNorm → ReLU` ×2; encoder downsamples with MaxPool, decoder
-  upsamples with transposed convolutions and concatenates the matching encoder
-  feature map (skip connection). Single-channel sigmoid output.
+- **Preprocessing** ([`dataset.py`](dataset.py)): green-channel CLAHE stacked
+  with a Frangi vesselness map → **2-channel** input; padded to 608×608
+  (divisible by 32 for the ResNet encoder).
+- **Model** ([`models.py`](models.py)): `build_model()` selects either a
+  `segmentation_models_pytorch` U-Net with an ImageNet-pretrained **ResNet34**
+  encoder, or the from-scratch U-Net ([`unet.py`](unet.py)) — `Conv → BN → ReLU`
+  ×2 blocks, MaxPool down, transposed-conv up, skip connections, single-channel
+  output.
 - **Loss** ([`losses.py`](losses.py)): `0.5 · BCE + 0.5 · Dice`. The Dice term
   counteracts the severe class imbalance — vessels are only ~8–13% of pixels.
 
@@ -49,18 +56,22 @@ RGB fundus image
 ## Training
 
 - **Data:** DRIVE training set (20 annotated images), split 16 train / 4 val.
-- **Strategy:** random **48×48 patch** sampling (8000 patches/epoch) whose
-  centres lie inside the FOV. Patch training keeps memory tiny and is the
-  configuration that reaches the benchmark — full-image training on an 8 GB GPU
-  is both slower (~530 s/epoch) and memory-bound.
-- **Optimizer:** Adam, lr 1e-3, cosine annealing, 150 epochs (~40 min on an
-  RTX 5060). Horizontal/vertical flip augmentation. Best-validation-F1
-  checkpoint is saved.
+- **Strategy:** random **64×64 patch** sampling (8000 patches/epoch) whose
+  centres lie inside the FOV. Patch training keeps memory tiny — full-image
+  training on an 8 GB GPU is both slower (~530 s/epoch) and memory-bound. Inputs
+  are cached so the Frangi filter is computed once per image, not every epoch.
+- **Optimizer:** Adam + cosine annealing, flip augmentation, best-validation-F1
+  checkpoint saved. The pretrained model wants a gentle recipe (**lr 1e-4**,
+  peaks by ~epoch 15–20); the scratch model uses lr 1e-3 over 150 epochs.
 
 ```bash
-python train.py --epochs 150 --base-channels 64 --batch-size 32 \
-                --patch-size 48 --patches-per-epoch 8000
-python evaluate.py --checkpoint checkpoints/unet_drive.pth
+# default: pretrained ResNet34 encoder
+python train.py --arch smp_resnet34 --epochs 50 --lr 1e-4 \
+                --patch-size 64 --patches-per-epoch 8000 --batch-size 16
+# from-scratch alternative (scored highest here)
+python train.py --arch unet --epochs 150 --lr 1e-3 \
+                --patch-size 64 --patches-per-epoch 8000 --batch-size 16
+python evaluate.py --checkpoint checkpoints/model_drive.pth
 ```
 
 ---
@@ -135,12 +146,17 @@ implementation: classical preprocessing + a clean U-Net + a deployable API.
 
 - **Medical image segmentation** end-to-end: preprocessing → model → loss →
   evaluation → deployment.
-- **From-scratch U-Net** in PyTorch with skip connections (no black-box
-  library).
+- **Classical + deep fusion:** CLAHE and a Hessian-based Frangi vesselness prior
+  stacked as a 2-channel input.
+- **Two interchangeable models:** a from-scratch U-Net *and* a transfer-learning
+  U-Net with a pretrained ResNet34 encoder (`segmentation_models_pytorch`).
 - **Class-imbalance handling** via a combined BCE+Dice objective.
 - **Correct evaluation:** FOV-masked F1/sensitivity/specificity/AUC, matching
   how the literature reports DRIVE.
-- **Memory-aware training** (patch sampling) that fits an 8 GB consumer GPU.
+- **Honest experimentation:** a clear, documented finding that the heavier
+  pretrained model did not beat the simpler one on this small dataset.
+- **Memory-aware training** (patch sampling + input caching) that fits an 8 GB
+  consumer GPU.
 - **Productionization:** a FastAPI service with a browser UI, JSON scores, and
   self-describing overlays.
 
@@ -153,13 +169,30 @@ paths.
 
 | File | Role |
 |------|------|
-| [`dataset.py`](dataset.py) | DRIVE loading, CLAHE, patch sampling, splits |
-| [`unet.py`](unet.py) | U-Net architecture |
+| [`dataset.py`](dataset.py) | DRIVE loading, CLAHE + Frangi, patch sampling, splits |
+| [`models.py`](models.py) | `build_model()` — smp ResNet34 or scratch U-Net |
+| [`unet.py`](unet.py) | From-scratch U-Net architecture |
 | [`losses.py`](losses.py) | BCE+Dice loss, segmentation metrics |
 | [`train.py`](train.py) | Training loop (patch-based, GPU-aware) |
 | [`evaluate.py`](evaluate.py) | FOV-masked F1 / Se / Sp / AUC |
 | [`app.py`](app.py) | FastAPI service + overlay + scores |
 | [`IMPROVEMENTS.md`](IMPROVEMENTS.md) | Optional upgrade paths |
+
+---
+
+## Notes & findings
+
+- **Pretrained ≠ automatically better.** On this 16-image split the heavier
+  smp + ResNet34 + Frangi model peaked at F1 ≈ 0.82 and then *overfit* (val F1
+  collapsing after ~epoch 15–20), while the from-scratch U-Net reached 0.834 and
+  stayed stable. Likely causes: ResNet34's 32× downsampling leaves only a 2×2
+  bottleneck on 64px patches, and a big pretrained net overfits 16 images fast.
+  Larger patches (96–128px) would suit the deep encoder better — see
+  [`IMPROVEMENTS.md`](IMPROVEMENTS.md).
+- **Best-checkpoint saving matters:** because the pretrained model degrades after
+  its peak, training always keeps the best-validation-F1 snapshot.
+- **Reproducibility caveat:** the val split is only 4 images, so expect ±a few
+  points of variance between runs.
 
 ## Install
 

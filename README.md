@@ -195,6 +195,24 @@ paths.
 - **Reproducibility caveat:** the val split is only 4 images, so expect ±a few
   points of variance between runs.
 
+---
+
+## What went wrong along the way (engineering log)
+
+A deliberately honest record of the failures hit building this, and the fixes —
+because the debugging is half the work:
+
+| Symptom | Root cause | Fix |
+|---------|-----------|-----|
+| `torch.cuda.is_available()` → `False` on an RTX 5060 | Installed the **CPU-only** torch wheel | Reinstall from the CUDA 12.8 index (Blackwell needs `cu128`, not `cu121`) |
+| Training "produced no output" / looked dead | Python **block-buffers stdout** when piped; logging only every 5 epochs | `-u` / flushed per-epoch + per-batch progress lines |
+| Full-image training: 530 s/epoch then `MemoryError` | Full 592²/608² activations thrash host RAM on 8 GB | **Patch-based training** (48→64px), the standard DRIVE recipe |
+| smp run collapsed: val F1 0.82 → 0.33 mid-training | lr 1e-3 over 150 epochs is too aggressive for a **pretrained** encoder on 16 images | Gentle recipe (lr 1e-4) + best-checkpoint saving; the model peaks by ~epoch 15 |
+| Recurring `Unable to allocate 1.26 MiB` (with 4.5 GB free!) | **Not** real OOM — a cygwin/bash `fork: Resource temporarily unavailable` artifact in the shell layer | Launch training via **native PowerShell**, not the cygwin shell |
+| Frangi recomputed every epoch → slow leak | `DriveDataset` rebuilt the 2-ch input on every `__getitem__` | Cache inputs once per image |
+| Frangi-agreement "confidence" read a misleading 47% | Pearson corr on a very peaky Frangi map is near-zero — an artifact | Dropped the blend; confidence = model decisiveness (~95%) |
+| **The headline negative:** Frangi + pretrained ResNet34 never beat the plain U-Net | Small domain-specific dataset; deeper pretrained net overfits and is starved at the bottleneck | Kept both selectable; shipped the simpler U-Net as default |
+
 ## Install
 
 ```bash

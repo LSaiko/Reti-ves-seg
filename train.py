@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -41,6 +42,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clip-limit", type=float, default=2.0)
     p.add_argument("--out", default="checkpoints/model_drive.pth")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--seed", type=int, default=42,
+                   help="RNG seed for weight init, patch sampling, and augmentation "
+                        "(does not affect the train/val split, which build_splits "
+                        "fixes separately).")
     return p.parse_args()
 
 
@@ -70,6 +75,8 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: str) -> dict[st
 
 def main() -> None:
     args = parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     device = args.device
     print(f"Device: {device}")
 

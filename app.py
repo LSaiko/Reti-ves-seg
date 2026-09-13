@@ -23,7 +23,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from PIL import Image
 
-from dataset import _pad_to, make_input
+from dataset import _pad_to, estimate_fov, make_input
+from explain import seg_grad_cam
 from models import build_model
 
 CHECKPOINT = os.environ.get("MODEL_CHECKPOINT", "checkpoints/model_drive.pth")
@@ -54,22 +55,6 @@ def get_model() -> torch.nn.Module:
         model.eval()
         _model = model
     return _model
-
-
-def estimate_fov(rgb: np.ndarray) -> np.ndarray:
-    """Estimate the circular field-of-view mask of a fundus image.
-
-    The retina is the bright disc on a near-black background, so a simple
-    luminance threshold recovers the FOV well enough for scoring.
-
-    Args:
-        rgb: RGB image of shape ``(H, W, 3)``, ``uint8``.
-
-    Returns:
-        Boolean FOV mask of shape ``(H, W)``.
-    """
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    return gray > 15
 
 
 @torch.no_grad()
@@ -162,6 +147,20 @@ def overlay_mask(rgb: np.ndarray, mask: np.ndarray, scores: dict[str, float] | N
     return blended
 
 
+def overlay_gradcam(rgb: np.ndarray, cam: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Blend a Seg-Grad-CAM heatmap under the vessel mask overlay.
+
+    The heatmap (jet colormap) shows which regions drove the model's
+    predictions; the vessel mask is drawn in solid red on top, as in
+    :func:`overlay_mask`, so both signals are visible at once.
+    """
+    heatmap = cv2.applyColorMap((cam * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    blended = cv2.addWeighted(rgb, 0.5, heatmap, 0.5, 0)
+    blended[mask == 1] = [255, 0, 0]
+    return blended
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     """Minimal browser upload form for the segmentation endpoint."""
@@ -173,6 +172,7 @@ def index() -> str:
       <form action="/segment" method="post" enctype="multipart/form-data">
         <input type="file" name="file" accept="image/*" required>
         <button type="submit">Segment</button>
+        <button type="submit" formaction="/explain">Explain (Grad-CAM)</button>
       </form>
     </body></html>
     """
@@ -224,3 +224,21 @@ async def segment_json(file: UploadFile = File(...)) -> dict[str, float]:
     rgb = await _read_rgb(file)
     mask, probs, fov, _ = predict(rgb)
     return quality_scores(mask, probs, fov)
+
+
+@app.post("/explain")
+async def explain(file: UploadFile = File(...)) -> StreamingResponse:
+    """Return a Seg-Grad-CAM overlay explaining the predicted vessel mask.
+
+    Highlights (jet heatmap) the regions that most drove the model's vessel
+    predictions, with the predicted mask itself drawn in red on top.
+    """
+    rgb = await _read_rgb(file)
+    mask, _, _, _ = predict(rgb)
+    cam = seg_grad_cam(get_model(), rgb, DEVICE)
+    blended = overlay_gradcam(rgb, cam, mask)
+
+    buf = io.BytesIO()
+    Image.fromarray(blended).save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")

@@ -93,7 +93,18 @@ curl.exe -F "file=@DRIVE/test/images/01_test.tif" \
 - `POST /segment` → overlay PNG (vessels in red) with the scores burned in and
   also returned as `X-Vessel-Coverage-Pct` / `X-Confidence-Pct` headers.
 - `POST /segment.json` → just the numeric scores.
+- `POST /explain` → Seg-Grad-CAM overlay PNG — a heatmap of which image
+  regions most drove the model's vessel predictions ([`explain.py`](explain.py)),
+  with the predicted mask drawn in red on top.
 - `GET /health` → liveness + device + checkpoint status.
+
+### Explainability (Seg-Grad-CAM)
+Plain Grad-CAM assumes a single class logit to backprop from, which a
+per-pixel segmentation model doesn't have. [`explain.py`](explain.py) uses
+**Seg-Grad-CAM** (Vinogradova et al. 2020) instead: it sums the predicted
+vessel logits inside the field of view as the scalar target, backprops that
+to the last decoder block, and applies the usual Grad-CAM weighting — giving
+a heatmap of *where* the vessel call came from, not just how confident it is.
 
 ### "Goodness" scores (no ground truth needed)
 - **Vessel coverage %** — share of the retina marked as vessel. Healthy fundus
@@ -182,6 +193,8 @@ paths.
 ---
 
 ## Notes & findings
+
+> Full write-up of this finding: [`WRITEUP.md`](WRITEUP.md).
 
 - **Pretrained ≠ automatically better.** On this 16-image split the heavier
   smp + ResNet34 model underperformed the from-scratch U-Net (0.833) at **every

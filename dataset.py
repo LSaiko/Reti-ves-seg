@@ -66,6 +66,22 @@ def frangi_vesselness(clahe_green: np.ndarray) -> np.ndarray:
     return (v / (v.max() + 1e-8)).astype(np.float32)
 
 
+def estimate_fov(rgb: np.ndarray) -> np.ndarray:
+    """Estimate the circular field-of-view mask of a fundus image.
+
+    The retina is the bright disc on a near-black background, so a simple
+    luminance threshold recovers the FOV well enough for scoring.
+
+    Args:
+        rgb: RGB image of shape ``(H, W, 3)``, ``uint8``.
+
+    Returns:
+        Boolean FOV mask of shape ``(H, W)``.
+    """
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    return gray > 15
+
+
 def make_input(image_rgb: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
     """Build the 2-channel network input from an RGB fundus image.
 

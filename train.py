@@ -102,6 +102,10 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     best_f1 = 0.0
 
+    log_path = os.path.splitext(args.out)[0] + "_log.csv"
+    with open(log_path, "w") as f:
+        f.write("epoch,train_loss,val_f1,val_sensitivity,val_specificity,seconds\n")
+
     import time
 
     for epoch in range(1, args.epochs + 1):
@@ -122,12 +126,18 @@ def main() -> None:
 
         # Validate every epoch so progress is always visible.
         metrics = evaluate(model, val_loader, device)
+        epoch_seconds = time.time() - t0
         print(
             f"\rEpoch {epoch:3d} | loss {running/len(train_loader):.4f} "
             f"| F1 {metrics['f1']:.4f} | Se {metrics['sensitivity']:.4f} "
-            f"| Sp {metrics['specificity']:.4f} | {time.time()-t0:.0f}s/epoch",
+            f"| Sp {metrics['specificity']:.4f} | {epoch_seconds:.0f}s/epoch",
             flush=True,
         )
+        with open(log_path, "a") as f:
+            f.write(
+                f"{epoch},{running/len(train_loader):.6f},{metrics['f1']:.6f},"
+                f"{metrics['sensitivity']:.6f},{metrics['specificity']:.6f},{epoch_seconds:.1f}\n"
+            )
         if metrics["f1"] > best_f1:
             best_f1 = metrics["f1"]
             torch.save(

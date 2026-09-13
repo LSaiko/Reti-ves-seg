@@ -55,6 +55,28 @@ number: at lr 1e-3 over 150 epochs, the pretrained model's validation F1
 best-checkpoint saving fixed the collapse, but the recovered model still
 topped out below the scratch net.
 
+## Training curves
+
+Real curves from re-running both configs end-to-end (120 epochs scratch /
+50 epochs pretrained, same hyperparameters as the results table):
+
+![training curves](docs/assets/training_curves.png)
+
+*(`train.py` now writes a per-epoch `_log.csv` next to every checkpoint —
+rerun the two commands in [README.md](README.md#training) with distinct
+`--out` paths to reproduce.)*
+
+Both models hit their peak validation F1 fast — scratch U-Net at epoch 14
+(F1 0.833), pretrained ResNet34 at epoch 19 (F1 0.824) — matching the
+headline table within run-to-run noise. What the curves show that the table
+alone doesn't: **both** architectures degrade after their peak on this tiny
+dataset, not just the pretrained one, as the collapse anecdote above might
+suggest. The pretrained model stays remarkably flat (~0.80–0.82) for the
+rest of its run; the scratch model's training loss keeps falling smoothly
+(classic overfitting) while its validation F1 drifts down and then falls off
+a cliff after epoch ~100, down to 0.45–0.6. Best-checkpoint saving isn't a
+nice-to-have here for either architecture — it's load-bearing for both.
+
 ## Hypothesis: why scratch beat pretrained here
 
 Two effects compound on a dataset this small (16 training images):
@@ -91,8 +113,6 @@ this dataset's scale better than a larger, borrowed one.
 - Evaluate cross-dataset transfer (e.g. train on DRIVE, test on CHASE_DB1 or
   STARE) — pretrained encoders are usually argued for on generalization
   grounds, which a same-dataset F1 comparison doesn't test.
-- Log loss/F1 per epoch to a file (today `train.py` only prints to stdout) so
-  a training-curve plot doesn't require a fresh training run to reconstruct.
 
 ## Takeaway
 

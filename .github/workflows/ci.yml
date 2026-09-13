@@ -29,3 +29,24 @@ jobs:
         run: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
       - run: pip install -r requirements-dev.txt
       - run: pytest -v
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t reti-ves-seg:ci .
+      - name: Run and smoke-test container
+        run: |
+          docker run -d --name app -p 8000:8000 reti-ves-seg:ci
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && exit 0
+            sleep 2
+          done
+          echo "container never became healthy" >&2
+          exit 1
+      - name: Container logs
+        if: always()
+        run: docker logs app
+      - name: Cleanup
+        if: always()
+        run: docker rm -f app
